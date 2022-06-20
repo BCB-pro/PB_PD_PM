@@ -1,0 +1,760 @@
+---
+title: "Analyse"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "")
+
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+library(openxlsx)
+library(tidyverse)
+library(furniture)
+library(ggpubr)
+library(rstatix)
+library(sjPlot)
+library(emmeans)
+library(viridis)
+library(MASS)
+library("texreg")
+library(gridExtra)
+library(kableExtra)
+
+# library(esquisse)
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.show='hide'}
+# Opening of databases ----
+df1 <- openxlsx::read.xlsx("/home/baptiste.criniere/Documents/PB_PD_PM/Data/MJFF_Parkin_confirmed_biallelic_pathogenic_relavent_clinical_mutinfo_remove_duplicates.xlsx", sheet = 1, na.strings = c("-99"))
+glimpse(df1)
+df2 <- openxlsx::read.xlsx("/home/baptiste.criniere/Documents/PB_PD_PM/Data/data_collaborators_clean.xlsx", startRow = 4)
+df3 <- openxlsx::read.xlsx("/home/baptiste.criniere/Documents/PB_PD_PM/Data/Clean_Redcap_3.xlsx")
+
+dh <- openxlsx::read.xlsx("/home/baptiste.criniere/Documents/PB_PD_PM/Data/combined_new4.xlsx")
+dh <- dh %>% 
+  dplyr::select(ID, UPDRS_on_and_converted_MDS, MMSE_1_and_converted_MOCA, UPDRS_off, LEDD, Mds_UPDRS)
+
+# Data management of df1 ----
+## Replace -99 with NA
+df1[] <-  lapply(df1, function(x) ifelse(x %in% c(-99, "-99"), NA, x))
+glimpse(df1)
+
+## Delete the * in the names of features
+names(df1) <- sapply(1:ncol(df1), function(x) gsub("[*].*$","",names(df1)[x]))
+
+## Recode the variables
+## And creation of disease_duration
+df1 <- df1 %>% 
+  dplyr::mutate(mut2_type = ifelse(is.na(mut2_type), mut1_type, mut2_type)) %>% 
+  dplyr::mutate(disease_duration = age_at_exam - age_at_onset)
+
+
+## Creation of mutation variable
+unique(df1$mut1_type)
+unique(df2$mutation2)
+keep <- c("missense", "frameshift", "structural variation")
+df1_bis <- df1 %>% 
+  dplyr::filter(mut1_type %in% keep & mut2_type %in% keep)
+df1_bis <- df1_bis %>% 
+  dplyr::mutate(Mutation = paste(mut1_type,by = "/", mut2_type ))
+unique(df1_bis$Mutation)
+df1_bis <- df1_bis %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% c("missense / frameshift", "frameshift / missense"), "frameshift / missense", Mutation))
+
+
+
+# Data management of df2 ----
+## Replace "N/A" with NA
+df2[] <-  lapply(df2, function(x) ifelse(x %in% c("N/A"), NA, x))
+glimpse(df2)
+
+## Delete variables with the same name
+names(df2)[duplicated(names(df2))]
+df2 <- df2 %>% 
+  dplyr::select(-c(41,42,43,44))
+
+## Creation of mutation variable
+unique(df2$mut1.type)
+unique(df2$mut2.type)
+df2 <- df2 %>% 
+  dplyr::mutate(mut1.type = ifelse(mut1.type %in% "Frameshift", "frameshift", mut1.type))
+keep <- c("missense", "frameshift", "structural")
+df2_bis <- df2 %>% 
+  dplyr::filter(mut1.type %in% keep & mut2.type %in% keep)
+df2_bis <- df2_bis %>% 
+  dplyr::mutate(Mutation = paste(mut1.type,by = "/", mut2.type ))
+unique(df2_bis$Mutation)
+df2_bis <- df2_bis %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% c("structural / missense", "structural / missense"), "missense / structural", Mutation))
+
+
+
+# Data management of df3 ----
+## Creation of mutation variable
+unique(df3$mut1.type)
+unique(df3$mut2.type)
+keep <- c("missense", "frameshift", "structural")
+df3_bis <- df3 %>% 
+  dplyr::filter(mut1.type %in% keep & mut2.type %in% keep)
+df3_bis <- df3_bis %>% 
+  dplyr::mutate(Mutation = paste(mut1.type,by = "/", mut2.type ))
+unique(df3_bis$Mutation)
+df3_bis <- df3_bis %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% c("missense / frameshift", "frameshift / missense"), "frameshift / missense", Mutation))
+
+
+
+# Merging of databases ----
+df1_bis <- df1_bis %>%
+  dplyr::select(ID, Mutation, disease_duration, age_at_onset, cognition_moca, updrs, cognition_mmse, hy_stage) %>% 
+  dplyr::rename(Disease_duration = disease_duration, Age_at_onset = age_at_onset, MOCA = cognition_moca,
+                UPDRS_on = updrs, MMSE = cognition_mmse, Hoehn_yahr_on = hy_stage) %>% 
+  dplyr::mutate(Base = "MJFOX")
+
+df2_bis <- df2_bis %>% 
+  dplyr::select(ID.number, Mutation, Duration.of.symptoms.at.time.of.examaination, Age.at.onset, MOCA, UPDRS.part.3.score.on, MMSE,
+                `Hoehn.and.Yahr.stage.(ON)`) %>% 
+  dplyr::rename(ID = ID.number, Disease_duration = Duration.of.symptoms.at.time.of.examaination, 
+                UPDRS_on = UPDRS.part.3.score.on, Hoehn_yahr_on = `Hoehn.and.Yahr.stage.(ON)`, Age_at_onset = Age.at.onset) %>% 
+  dplyr::mutate(Base = "collaborators")
+
+df3_bis <- df3_bis %>% 
+  dplyr::select(ID, Mutation, Disease_duration_1, Age_at_onset, MOCA, UPDRS_on, MMSE_1, Hoehn_yahr_on) %>% 
+  dplyr::rename(Disease_duration = Disease_duration_1, MMSE = MMSE_1) %>% 
+  dplyr::mutate(Base = "RedCap")
+
+df <- rbind(df1_bis, df2_bis, df3_bis)
+
+
+# Data management df ----
+df <- df %>% 
+  dplyr::mutate(MOCA = as.numeric(MOCA)) %>% 
+  dplyr::mutate(UPDRS_on = as.numeric(UPDRS_on)) %>% 
+  dplyr::mutate(MMSE = as.numeric(MMSE)) %>% 
+  dplyr::mutate(Hoehn_yahr_on = as.numeric(Hoehn_yahr_on)) %>% 
+  dplyr::mutate(Base = factor(Base))
+
+df <- df %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% "frameshift / structural variation", "frameshift / structural", Mutation)) %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% "missense / structural variation","missense / structural", Mutation)) %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% "structural variation / structural variation", "structural / structural", Mutation)) %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% "missense / frameshift", "frameshift / missense", Mutation))
+
+# Recode Mutation ----
+df <- df %>% 
+  dplyr::mutate(Mutation = Mutation %>% 
+                  factor() %>% 
+                  forcats::fct_recode("f/m" = "frameshift / missense",
+                                      "m/s" = "missense / structural",
+                                      "m/m" = "missense / missense",
+                                      "f/s" = "frameshift / structural",
+                                      "f/f" = "frameshift / frameshift",
+                                      "s/s" = "structural / structural"))
+
+
+df <- df %>%
+  dplyr::filter(!ID %in% c("998915051", "998914989"))
+
+dh <- dplyr::left_join(df, dh, by = "ID")
+dh <- dh %>% 
+  dplyr::mutate(UPDRS_on_and_converted_MDS = as.numeric(UPDRS_on_and_converted_MDS)) %>% 
+  dplyr::mutate(MMSE_1_and_converted_MOCA = ifelse(MMSE_1_and_converted_MOCA %in% "N/A", NA, MMSE_1_and_converted_MOCA)) %>% 
+  dplyr::mutate(MMSE_1_and_converted_MOCA = as.numeric(MMSE_1_and_converted_MOCA)) %>% 
+  dplyr::mutate(LEDD = ifelse(LEDD %in% "N/A", NA, LEDD)) %>% 
+  dplyr::mutate(LEDD = as.numeric(LEDD))
+
+  
+```
+
+
+
+## Descriptive statistics
+```{r echo=FALSE, warning=F, message=FALSE}
+df %>% furniture::table1(Age_at_onset,
+                          splitby = ~ Mutation,
+                         output     = "markdown"
+                          )
+df %>% furniture::table1(Disease_duration,
+                          splitby = ~ Mutation,
+                         output     = "markdown"
+                          )
+df %>% furniture::table1(MMSE,
+                          splitby = ~ Mutation,
+                          output     = "markdown"
+                          )
+
+df %>% furniture::table1(UPDRS_on,
+                          splitby = ~ Mutation,
+                          output     = "markdown"
+                          )
+df %>% furniture::table1(Hoehn_yahr_on,
+                          splitby = ~ Mutation,
+                          output     = "markdown")
+```
+
+\newpage
+
+
+## Age at onset analysis
+### Data base effect ?
+There was no significant effect of the database on age at onset but there is an effect of the Mutation on the age at onset.
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+mod <- lm(Age_at_onset ~ Mutation + Base, data = df)
+anova(mod)
+```
+
+
+### Mutation effect
+The ANOVA test is used to compare the mean of several groups. It is an extension of t-test which compare means in a situation where there are more than two groups. \
+We can see that there is a significant global effect of the mutation on the age at onset.
+Looking at the post hoc tests, we notice that there is a significant difference between the mean of the m/m group and the means of the "structural" groups s/m, s/f, s/s.
+```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.show='hide'}
+# Outliers ----
+# There do not seem to be any outliers
+df %>% 
+  group_by(Mutation) %>%
+  identify_outliers(Age_at_onset)
+
+# Assumption of normality ----
+# On the basis of the qqplot
+# We don't reject the normality assumption
+# even if the shapiro test is significant
+mod  <- lm(Age_at_onset ~ Mutation, data = df)
+ggqqplot(residuals(mod))
+shapiro_test(residuals(mod))
+
+# Assumption of normality by groups ----
+# in the group f/s maybe but it seem to be the fault of
+# the extreme value of one individual
+df %>%
+  group_by(Mutation) %>%
+  shapiro_test(Age_at_onset)
+ggqqplot(df, "Age_at_onset", facet.by = "Mutation")
+
+# The assumption of homogeneity of variances ----
+# The assumption of homogeneity of the variances seems to be satisfied
+plot(mod, 1)
+df %>% levene_test(Age_at_onset ~ Mutation)
+```
+
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.align='center'}
+# ANOVA ----
+aov <- df %>% anova_test(Age_at_onset ~ Mutation)
+aov
+# Tests post-hoc ----
+pwc <- df %>% tukey_hsd(Age_at_onset ~ Mutation)
+pwc
+# Plot of the results ----
+pwc <- pwc %>% add_xy_position(x = "Mutation")
+ggboxplot(df, x = "Mutation", y = "Age_at_onset") +
+  stat_pvalue_manual(pwc, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(aov, detailed = TRUE),
+    caption = get_pwc_label(pwc)
+    )+ylab("Age at onset")
+```
+
+\newpage
+
+## UPDRS on
+### Mutation effect & disease duration
+There does not appear to be any effect of the mutation on the mean level of the UPDRS score. \
+The interaction between the mutation and the disease duration is not significant at the threshold of 0.05 (pvalue = 0.052). \
+The share of variance of the UPDRS on variable explained by the disease duration is 14.5%
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide', }
+# Modelization ----
+# The model with the square root term on the outcome (UPDRS) seems to be the best, since it minimizes the BIC, and best tests the residual assumptions.
+# However, this model loses interpretability compared to a simple linear model, and the differences are not significant with the simple linear model.
+mod0 <- lm(UPDRS_on ~ Mutation * Disease_duration, df)
+mod0bis <- lm(sqrt(UPDRS_on) ~ Mutation * Disease_duration, df)
+mod1 <- lm(sqrt(UPDRS_on) ~ Disease_duration, df)
+mod2 <- lm(UPDRS_on ~  I(Disease_duration^2), df)
+mod3 <- lm(UPDRS_on ~  Disease_duration, df)
+
+# Comparison model : the best seems to be the one with sqrt ----
+BIC(mod0, mod1, mod2, mod3, mod0bis)
+
+# We test the mutation effect ----
+anova(mod0)
+anova(mod0bis)
+
+# Test post hoc ----
+emms <-  emmeans::emmeans(mod0, pairwise ~  Mutation * Disease_duration)
+contrast(emms)
+```
+
+Here is the plot of the UPDRS against the Disease Duration for each group
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+df %>%
+  ggplot(aes(x = Disease_duration,
+             y = UPDRS_on, color = Mutation)) +
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_smooth(method = lm, formula = y ~ x, se=F)+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on") +
+  scale_color_viridis(discrete = TRUE, option = "D")
+emtrends(mod0, pairwise ~ Mutation, var = "Disease_duration")
+```
+
+\newpage
+
+There is a statistically significant effect of disease duration on UPDRS, pvalue = 1e-08. With this model a patient loses 5 UPDRS points every 10 years, and with a disease duration of zero a patient has a UPDRS of 10.5.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center'}
+# Plot mod 3 ----
+df %>%
+  ggplot(aes(x = Disease_duration,
+             y = UPDRS_on)) +
+  geom_count()+
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_smooth(method = lm, formula = y ~ x, se=F, color = "darkorange3")+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on")
+
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide'}
+# Plot mod3 & mod1 ----
+eq = function(x){(0.053*x+3.12)**2}
+
+df %>%
+  ggplot(aes(x = Disease_duration,
+             y = UPDRS_on)) +
+  geom_count()+
+  geom_function(fun=eq, color = "darkmagenta")+
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_smooth(method = lm, formula = y ~ x, se=F, color = "darkorange3")+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on")
+
+
+
+# Plot mod 1 ----
+sjPlot::set_theme(base = theme_classic())
+sjPlot::plot_model(mod1,
+                   type = "pred",
+                   terms = c("Disease_duration"), show.loess = TRUE)
+```
+
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide'}
+# Hypothesis
+ggqqplot(residuals(mod0))
+ggqqplot(residuals(mod1))
+ggqqplot(residuals(mod2))
+ggqqplot(residuals(mod3))
+
+# plot(mod2, which = 1)
+# plot(mod2, which = 2)
+# hist(mod$residuals)
+
+# Brouillon
+# eq = function(x){(0.053*x+3.12)**2}
+# df %>% mutate(xseq = seq(0,60, 60*1/nrow(df))[-1]) %>% 
+#   ggplot(aes(x = xseq)) +
+#   geom_function(fun=eq, color = "darkmagenta")
+```
+
+\newpage
+
+## Hoehn et yahr on
+### Linear model
+There is no significant effect significant of the mutation on the Hoehn et yahr score. But there is an important significant effect of the disease duration on the Hoehn et yahr score (pvalue = 4e-10). In our model, the average score for a disease duration of 0 is 1.5, and the score increases by 0.32 every 10 years.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide'}
+# Modelization ----
+mod0 <- lm(Hoehn_yahr_on ~ Mutation * Disease_duration, df)
+mod1 <- lm(Hoehn_yahr_on ~ Disease_duration, df)
+
+# Comparison model : the best seems to be the one with sqrt ----
+AIC(mod0, mod1)
+
+# We test the mutation effect ----
+anova(mod0)
+anova(mod1)
+
+# Assumptions ----
+ggqqplot(residuals(mod1))
+sjPlot::plot_model(mod1, type = "diag")
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center'}
+# Plot mod 1 ----
+df %>%
+  ggplot(aes(x = Disease_duration,
+             y = Hoehn_yahr_on)) +
+  geom_count()+
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_smooth(method = lm, formula = y ~ x, se=F, color = "midnightblue")+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("Hoehn et Yahr")
+
+```
+\newpage
+
+### Ordinal model
+### Explanation
+As the Hoehn et Yahr score is not really a continuous variable (as it has few different occurrences), in order to be methodologically correct, this variable must be considered as a categorical and ordinal variable. \
+We have discretized the HetY score into 4 categories, below 1.5, between 1.5 and 2.5, 3, and 4 or more. The summary of statistics is presented below. \
+Since it is a categorical variable, we use a logistic model in which we do not predict the score (as in the previous linear model) but the probability of belonging to a stage Hoehn et Yahr.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center'}
+# Data management & summary statistics ----
+df <- df %>% 
+  dplyr::mutate(h_et_y_cat = ifelse(Hoehn_yahr_on %in% c(1,1.5,0), "Stade 0, 1", Hoehn_yahr_on)) %>% 
+  dplyr::mutate(h_et_y_cat = ifelse(Hoehn_yahr_on %in% c(2,2.5), "Stade 2", h_et_y_cat)) %>%
+  dplyr::mutate(h_et_y_cat = ifelse(Hoehn_yahr_on %in% 3, "Stade 3", h_et_y_cat)) %>%
+  dplyr::mutate(h_et_y_cat = ifelse(Hoehn_yahr_on %in% c(4,5), "Stade 4 et +", h_et_y_cat))
+df$h_et_y_cat <-  ordered(df$h_et_y_cat, levels = c("Stade 0, 1", "Stade 2", "Stade 3", "Stade 4 et +"))
+
+
+df %>% 
+  dplyr::group_by(h_et_y_cat) %>% 
+  furniture::table1("Disease duration" = Disease_duration,
+                    na.rm  = FALSE,
+                    digits = 2,
+                    total = TRUE,
+                    output = "markdown")
+```
+
+
+### Results
+In this type of modeling we must check Proportional odds assumption. In our case, the Brant test confirms that this hypothesis is fulfilled. \
+There is no significant difference between stage 0.1 and stage 2, but there are significant differences between stage 2 and stage 3, and stage 3 and stage 4+. There was also a significant effect of disease duration on the probability of belonging to a Hoehn and Yahr group (p < 0.001), the higher the disease duration, the greater the probability of belonging to a high stage.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results = 'asis'}
+# Modélisation ----
+mod2 <- MASS::polr(h_et_y_cat ~ Disease_duration,
+                         data = df, Hess = T)
+
+# Proportional odds assumption ----
+# The poTest function implements tests proposed by Brant (1990) for proportional odds for logistic models fit by the polr() function in the MASS package.
+# A significant test statistics provides evidence that the parallel regression assumption has been violated!
+# car::poTest(mod2)
+
+# summary(mod2)
+
+texreg::knitreg(mod2,
+                custom.model.name = c("b (SE)"),
+                groups = list("Predictors" = 1,
+                              "Cut Values (i.e. threasholds)" = 2:4),
+                float.pos = "h",
+                caption.above = TRUE,
+                single.row = TRUE,
+                digits = 4)
+```
+
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+# Predicted probability
+ggeffects::ggeffect(model = mod2,
+                    terms = c("Disease_duration"))
+
+
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center'}
+ggeffects::ggeffect(model = mod2,
+                    terms = c("Disease_duration")) %>%    # x-axis
+  data.frame() %>% 
+  ggplot(aes(x = x,
+             y = predicted,
+             color = response.level)) +
+  # geom_errorbar(aes(ymin = conf.low,
+  #                   ymax = conf.high),
+  #               width = .25) +
+  geom_point(size = 2) +
+  geom_line()+
+  scale_color_grey(start = 0.8, end = 0.2)+
+  labs(x = "Disease Duration",
+       y = "Predicted Probability",
+       color    = "Hoehn and yahr stage :")+
+  theme(legend.key.width = unit(2, "cm"))+
+  scale_linetype_manual(values = c("solid", "longdash", "dotdash", "dotted"))+
+  theme_bw() + 
+  theme(legend.background = element_rect(color = "black"))+
+  labs(title = "Prediction of belonging to a Hoehn and Yahr stage based on diease duration")
+```
+
+\newpage
+
+## MMSE
+By taking the raw data, the model assumptions are not fulfilled. We remove the extreme values and there is still no effect of the disease duration on the MMSE. It would seem that there is not enough variability in the data the MMSE is concentrated between 25 and 30 whatever the disease duration as can be seen in the figures below.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+# Modelization ----
+mod0 <- lm(MMSE ~  Disease_duration, df)
+anova(mod0)
+# sjPlot::plot_model(mod0, type = "diag")
+
+# We delete extreme ----
+dfbis <- df %>% 
+  dplyr::filter(MMSE < 20)
+mod1 <- lm(MMSE ~  Disease_duration, dfbis)
+anova(mod1)
+# sjPlot::plot_model(mod0, type = "diag")
+
+
+fig1 <- df %>% ggplot(aes(x = MMSE))+
+  geom_histogram(fill = "chocolate4", alpha = 0.9)+
+  theme_bw()
+
+fig2 <- df %>% ggplot(aes(x = Disease_duration, y = MMSE))+
+  geom_point(alpha= 0.8)+
+  xlab("Disease duration")+
+  theme_bw()
+grid.arrange(fig1, fig2, nrow = 1)
+```
+
+\newpage
+
+## LEDD
+We notice that there are two extremes (first figure) which will create problems in terms of the assumptions of normality of the model, this is why we make a model with and a model without them. There is no effect of mutation on dose, however there is a significant effect of disease duration on dose (pvalue = 0.001). \
+The average level for a disease duration of 0 is 326, and the dose increases by 95 every 10 years. \
+The share of variance of the LEDD variable explained by the disease duration is 8.5%.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide', fig.width=3.5,  fig.height=3.5}
+# Data visualization
+fig1 <- dh %>% ggplot(aes(x = LEDD))+
+  geom_histogram(fill = "chocolate4", alpha = 0.9)+
+  theme_bw()
+fig1
+# Modelization ----
+# mod0 with the disease duration and the mutation
+mod0 <- lm(LEDD ~  Disease_duration*Mutation, dh)
+anova(mod0)
+# mod1 with the sqrt of the disease duration
+mod1 <- lm(sqrt(LEDD) ~  Disease_duration, dh)
+anova(mod1)
+# mod 2 we delete the 2 extremes
+dhbis <- dh %>% 
+  filter(LEDD < 2000)
+mod2 <- lm(LEDD ~  Disease_duration, dhbis)
+anova(mod2)
+summary(mod2)
+
+fig2 <- dhbis %>% ggplot(aes(x = Disease_duration, y = LEDD))+
+  geom_smooth(method = lm, formula = y ~ x, se=F, color = "midnightblue")+
+  geom_point(alpha= 0.8)+
+  xlab("Disease duration")+
+  theme_bw()
+fig2
+
+
+```
+
+\newpage
+
+## UPDRS off
+There is no effect of the mutation on the UPDRS off, after which there may not be enough observation to detect this effect.
+We still observe a statistically significant effect of disease duration on the UPDRS off (pvalue = 0.005).
+The average level for a disease duration of 0 is 19.4 and we observe an increase of 8.3 every 10 years. The variable disease duration explains 14% of the variance of UPDRS off.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide', fig.width=4,  fig.height=4}
+mod0 <- lm(UPDRS_off ~  Disease_duration*Mutation, dh)
+anova(mod0)
+mod1 <- lm(UPDRS_off ~  Disease_duration, dh)
+summary(mod1)
+
+
+# sjPlot::plot_model(mod1, type = "diag")
+
+fig2 <- dhbis %>% ggplot(aes(x = Disease_duration, y = UPDRS_off))+
+  geom_smooth(method = lm, formula = y ~ x, se=F, color = "indianred4")+
+  geom_point(alpha= 0.8)+
+  xlab("Disease duration")+
+  theme_bw()+
+  xlim(0, 40)+
+  ylab("UPDRS off")
+fig2
+```
+
+## Mds UPDRS
+There is no effect of mutation or disease duration on the Mds UPDRS variable.
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+mod0 <- lm(Mds_UPDRS ~  Disease_duration*Mutation, dh)
+# anova(mod0)
+mod1 <- lm(Mds_UPDRS ~  Disease_duration, dh)
+# anova(mod1)
+
+# sjPlot::plot_model(mod1, type = "diag")
+
+dh %>% furniture::table1(Mds_UPDRS,
+                          splitby = ~ Mutation,
+                         output     = "markdown"
+                          )
+```
+
+\newpage
+
+## UPDRS on and converted MDS
+There is no significant effect of the mutation on the UPDRS on and converted MDS. But there is a significant effect of the disease duration on the UPDRS on and converted MDS. ( pvalue = 1e10-07) \
+The average score for a disease duration of 0 is 12.1 and there is an increase of 4.5 points every 10 years.
+The variable disease duration explains 10.5% of the variance of UPDRS on and converted MDS.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide', fig.width=4,  fig.height=4}
+mod0 <- lm(UPDRS_on_and_converted_MDS ~  Disease_duration*Mutation, dh)
+anova(mod0)
+mod1 <- lm(UPDRS_on_and_converted_MDS ~  Disease_duration, dh)
+anova(mod1)
+summary(mod1)
+# sjPlot::plot_model(mod1, type = "diag")
+
+
+fig2 <- dhbis %>% ggplot(aes(x = Disease_duration, y = UPDRS_on_and_converted_MDS))+
+  geom_smooth(method = lm, formula = y ~ x, se=F, color = "indianred4")+
+  geom_point(alpha= 0.8)+
+  xlab("Disease duration")+
+  theme_bw()+
+  xlim(0, 40)+
+  ylab("UPDRS on and converted MDS")
+fig2
+```
+
+
+## Parkinson with no mutation
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide', fig.width=4,  fig.height=4}
+data <- read.csv2("/home/baptiste.criniere/Documents/PB_PD_PM/Data/no_mutation_redcap2.csv", sep =";")
+data <- data[,-1]
+data <- data %>% 
+  dplyr::mutate(UPDRS_on = as.numeric(as.character(UPDRS_on))) %>% 
+  dplyr::mutate(UPDRS_off = as.numeric(as.character(UPDRS_off)))
+mod0 <- lm(UPDRS_on ~  Disease_duration, data)
+summary(mod0)
+
+
+# FPD-BOR-LAL-469-5
+databis <- data %>% 
+  dplyr::mutate(age_binaire = ifelse(Age_at_onset >55, "Yes", "Non"))
+mod0 <- lm(UPDRS_on ~  Disease_duration*age_binaire, databis)
+summary(mod0)
+
+databis %>% ggplot(aes(x = Disease_duration, y = UPDRS_on, group = age_binaire, color = age_binaire))+
+  geom_smooth(method = lm, formula = y ~ x, se=F)+
+  geom_count(alpha= 0.8)+
+  xlab("Disease duration")+
+  theme_bw()+
+  xlim(0, 40)+
+  ylab("UPDRS on and converted MDS")
+
+ 
+# sjPlot::plot_model(mod0, type = "diag")
+```
+
+## Sex effect
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+# Data management ----
+data <- openxlsx::read.xlsx("/home/baptiste.criniere/Documents/PB_PD_PM/Data/combined_new4.xlsx", sheet = 1)
+data <- data %>% 
+  dplyr::mutate(Sex = gender.x %>% factor() %>% forcats::fct_recode("Female" = "female", "Male" = "male")) %>% 
+  dplyr::mutate(UPDRS_on_and_converted_MDS = as.numeric(UPDRS_on_and_converted_MDS)) %>% 
+  dplyr::mutate(MMSE_1_and_converted_MOCA = as.numeric(MMSE_1_and_converted_MOCA)) %>% 
+  dplyr::mutate(LEDD = as.numeric(LEDD)) %>% 
+  dplyr::mutate(Hoehn_yahr_on = ifelse(Hoehn_yahr_on %in% "N/A", NA, Hoehn_yahr_on)) %>% 
+  dplyr::mutate(Hoehn_yahr_off = ifelse(Hoehn_yahr_off %in% "N/A", NA, Hoehn_yahr_off)) %>% 
+  dplyr::mutate(Hoehn_yahr_on = factor(Hoehn_yahr_on, ordered = TRUE)) %>% 
+  dplyr::mutate(Hoehn_yahr_off = factor(Hoehn_yahr_off, ordered = TRUE)) %>% 
+  dplyr::mutate(Missing_updrs_on = ifelse(is.na(UPDRS_on_and_converted_MDS), NA, "Not missing")) %>% 
+  dplyr::mutate(Missing_MMSE = ifelse(is.na(MMSE_1_and_converted_MOCA), NA, "Not missing")) %>% 
+  dplyr::mutate(Missing_ledd = ifelse(is.na(LEDD), NA, "Not missing")) %>% 
+  dplyr::mutate(Missing_hoehn_on = ifelse(is.na(Hoehn_yahr_on), NA, "Not missing")) %>% 
+  dplyr::mutate(Missing_hoehn_off = ifelse(is.na(Hoehn_yahr_off), NA, "Not missing")) %>% 
+  dplyr::mutate(Missing_age = ifelse(is.na(Age_at_onset), NA, "Not missing")) %>% 
+  dplyr::mutate(Missing_updrs_off = ifelse(is.na(UPDRS_off), NA, "Not missing"))
+
+# Descriptive statistics ----
+data %>% 
+  dplyr::group_by(forcats::fct_explicit_na(Sex)) %>% 
+  furniture::table1("Missing Age at onset" = Missing_age,
+                    "Age at onset" = Age_at_onset,
+                    "Missing UPDRS on" = Missing_updrs_on,
+                    "UPDRS on and converted MDS" = UPDRS_on_and_converted_MDS,
+                    "Missing MMSE" = Missing_MMSE,
+                    "MMSE and converted MOCA" = MMSE_1_and_converted_MOCA,
+                    "Missing LEDD" = Missing_ledd,
+                    "LEDD" = LEDD,
+                    "Hoehn et Yahr on" = Hoehn_yahr_on,
+                    "Hoehn et Yahr off" = Hoehn_yahr_off,
+                    "Missing UPDRS off" = Missing_updrs_off,
+                    "UPDRS off" = UPDRS_off,
+                    na.rm  = FALSE,
+                    digits = 2,
+                    output = "markdown")
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+a1 <- round(t.test(Age_at_onset ~ Sex, data)$p.value, digits = 3)
+a2 <- round(t.test(UPDRS_on_and_converted_MDS ~ Sex, data)$p.value, digits = 3)
+a3 <- round(t.test(MMSE_1_and_converted_MOCA ~ Sex, data)$p.value, digits = 3)
+a4 <- round(t.test(LEDD ~ Sex, data)$p.value, digits = 3)
+a5 <- round(t.test(UPDRS_off ~ Sex, data)$p.value, digits = 3)
+
+tableau <- data.frame(Variable = c("Age at onset", "UPDRS on", "MMSE", "LEDD", "UPDRS off"),pvalue = c(a1, a2, a3, a4, a5))
+tableau %>% kable(format = "latex", booktabs = T) %>% 
+  kable_styling(latex_options = c("striped", "HOLD_position"))
+```
+
+\newpage
+
+## Dichotomizing the variable
+### Age at onset
+There are 42 patients with an age at onset above 45, and 425 with an age below or equal to 45. \
+
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+keep <- c("missense", "frameshift", "structural")
+df <- df %>% 
+  dplyr::mutate(Binary_age = ifelse(Age_at_onset > 45, "Late", "Early") %>% 
+                  factor())
+  
+table(df$Binary_age)
+mod2 <- glm(Binary_age ~ Disease_duration*Mutation, data = df, family = binomial(link = "logit"))
+# test du rapport de vraisemblance
+anova(mod2, test="Chisq")
+```
+
+### UPDRS on
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+df <- df %>% 
+  dplyr::mutate(Categorical_UPDRS = ifelse(UPDRS_on < 20, "Low UPDRS", NA)) %>% 
+  dplyr::mutate(Categorical_UPDRS = ifelse(20 <= UPDRS_on & UPDRS_on < 40, "Medium UPDRS", Categorical_UPDRS)) %>% 
+  dplyr::mutate(Categorical_UPDRS = ifelse(40 <= UPDRS_on, "High UPDRS", Categorical_UPDRS)) %>% 
+  dplyr::mutate(Categorical_UPDRS = Categorical_UPDRS %>% factor(levels = c("Low UPDRS", "Medium UPDRS", "High UPDRS"), ordered = TRUE))
+  
+table(df$Categorical_UPDRS)
+
+mod2 <- MASS::polr(Categorical_UPDRS ~ Disease_duration*Mutation,
+                         data = df, Hess = T)
+summary(mod2)
+
+# 
+# texreg::knitreg(mod2,
+#                 groups = list("Predictors" = 1,
+#                               "Cut Values (i.e. threasholds)" = 2:4),
+#                 caption = "Hoffmann's Example 4.4 Ordered Logistic Regression",
+#                 caption.above = TRUE,
+#                 single.row = TRUE,
+#                 digits = 4)
+```
+
+### MMSE
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+df <- df %>% 
+  dplyr::mutate(Bin_MMSE = ifelse(MMSE < 28, "Low MMSE", NA)) %>% 
+  dplyr::mutate(Bin_MMSE = ifelse(MMSE >= 28, "High MMSE", Bin_MMSE)) %>% 
+  dplyr::mutate(Bin_MMSE = factor(Bin_MMSE))
+  
+table(df$Bin_MMSE)
+
+mod2 <- glm(Bin_MMSE ~ Disease_duration*Mutation, data = df, binomial(link = "logit"))
+anova(mod2, test = "Chisq")
+```
+
+
+
+
+
+
+
