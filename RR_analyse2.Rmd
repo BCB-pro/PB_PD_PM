@@ -1,0 +1,640 @@
+---
+title: "Analyse 2"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "")
+
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+library(openxlsx)
+library(tidyverse)
+library(furniture)
+library(ggpubr)
+library(rstatix)
+library(sjPlot)
+library(emmeans)
+library(viridis)
+library(MASS)
+library("texreg")
+library(gridExtra)
+library(kableExtra)
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE}
+# Data management ----
+data <- openxlsx::read.xlsx("/home/baptiste.criniere/Documents/PB_PD_PM/Data/combined_new7.xlsx", sheet = 1)
+data <- data %>% 
+  dplyr::select(ID, mut1_newtype, mut2_newtype, Age_at_onset, Disease_duration_1,UPDRS_on_and_converted_MDS, mut1_new_pdomain,
+                mut2_new_pdomain, CADD_1, CADD_2, DBS, Year.of.DBS, LEDD_1, disease_duration_for_LEDD_1,
+                disease.duration.at.time.of.DBS,LEDD2, disease.duration)
+
+data <- data %>% 
+  dplyr::mutate(Mutation = paste(mut1_newtype,by = "/", mut2_newtype)) %>% 
+  # dplyr::mutate(mut.2.protein.domain = ifelse(mut.2.protein.domain %in% "RING-Type 2", "RING-type 2", mut.2.protein.domain)) %>% 
+  dplyr::mutate(Protein = paste(mut1_new_pdomain,by = "/", mut2_new_pdomain))
+
+data <- data %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% "inframe / structural", "structural / inframe", Mutation)) %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% "truncating / structural", "structural / truncating", Mutation)) %>% 
+  dplyr::mutate(Mutation = ifelse(Mutation %in% "truncating / inframe", "inframe / truncating", Mutation))
+
+data <- data %>% 
+  dplyr::mutate(Mutation = Mutation %>% 
+                  factor() %>% 
+                  forcats::fct_recode("t/t" = "truncating / truncating",
+                                      "s/i" = "structural / inframe",
+                                      "s/t" = "structural / truncating",
+                                      "i/i" = "inframe / inframe",
+                                      "s/s" = "structural / structural",
+                                      "i/t" = "inframe / truncating",
+                                      ))
+
+data <- data %>% 
+  dplyr::mutate(UPDRS_on_and_converted_MDS = as.numeric(UPDRS_on_and_converted_MDS)) %>% 
+  dplyr::mutate(CADD_1 = as.numeric(CADD_1))
+
+
+data3 <- data %>% 
+  dplyr::filter(Protein %in% c("Ring0 / Ring0", "IBR / IBR", "Ring2 / Ring2", "Ubiquitin / Ubiquitin", "Ring1 / Ring1"))
+
+data2 <- data %>% 
+  dplyr::select(ID, LEDD_1, disease_duration_for_LEDD_1, LEDD2, disease.duration, DBS, disease.duration.at.time.of.DBS) %>% 
+  dplyr::rename(DD_LEDD1 = disease_duration_for_LEDD_1,
+                DD_LEDD2 = disease.duration,
+                DD_DBS = disease.duration.at.time.of.DBS) %>% 
+  dplyr::filter(!is.na(DBS)) %>% 
+  dplyr::filter(!ID %in% "SPD-SAL-DES-169-3") %>% 
+  dplyr::mutate(LEDD_1 = as.numeric(LEDD_1)) %>% 
+  dplyr::mutate(LEDD2 = as.numeric(LEDD2))
+```
+
+
+
+## Asses if age of onset is influenced by the mutation type
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.show='hide'}
+# No extreme values
+data %>% 
+  group_by(Mutation) %>%
+  identify_outliers(Age_at_onset)
+
+# Assumption of normality ----
+# On the basis of the qqplot
+# We don't reject the normality assumption
+# even if the shapiro test is significant
+mod  <- lm(Age_at_onset ~ Mutation, data = data)
+confint(mod)
+ggqqplot(residuals(mod))
+shapiro_test(residuals(mod))
+
+# Assumption of normality by groups ----
+# in the group f/s maybe but it seem to be the fault of
+# the extreme value of one individual
+data %>%
+  group_by(Mutation) %>%
+  shapiro_test(Age_at_onset)
+ggqqplot(data, "Age_at_onset", facet.by = "Mutation")
+
+# The assumption of homogeneity of variances ----
+# The assumption of homogeneity of the variances seems to be satisfied
+plot(mod, 1)
+data %>% levene_test(Age_at_onset ~ Mutation)
+```
+
+### Statistics
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center'}
+# Summary statistics ----
+data %>%
+  group_by(Mutation) %>%
+  get_summary_stats(Age_at_onset, type = "mean_sd")
+```
+
+### Boxplot & ANOVA
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.align='center'}
+# Summary statistics ----
+data %>%
+  group_by(Mutation) %>%
+  get_summary_stats(Age_at_onset, type = "mean_sd")
+# ANOVA ----
+aov <- data %>% anova_test(Age_at_onset ~ Mutation)
+aov
+# Tests post-hoc ----
+pwc <- data %>% tukey_hsd(Age_at_onset ~ Mutation)
+pwc
+# Plot of the results ----
+pwc <- pwc %>% add_xy_position(x = "Mutation")
+ggboxplot(data, x = "Mutation", y = "Age_at_onset", fill = "Mutation") +
+  stat_pvalue_manual(pwc, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(aov, detailed = TRUE),
+    caption = get_pwc_label(pwc)
+    )+ylab("Age at onset")
+```
+
+
+
+
+\newpage
+
+## Asses if UPDRS is influenced by the mutation type
+
+### First we select the best model
+We tested the following three models :
+
+1. $$ \text{UPDRS} = \text{Mutation} \times \text{Disease duration} $$
+2. $$ \sqrt{\text{UPDRS}} = \text{Mutation} \times \text{Disease duration} $$
+3. $$ log(\text{UPDRS}) = \text{Mutation} \times \text{Disease duration} $$
+
+We choose the model that minimizes the BIC criterion, it is the model 3 with the log. Next, the assumptions of this linear model were verified (constant variance assumptions, normality assumption). Then we tested the effects of disease duration, mutation and the interaction between disease duration and mutation on UPDRS. In this model there is no effect of the mutation alone and in interaction on the UPDRS. \
+Thus the best model is the following model : $log(\text{UPDRS}) = \text{Disease duration}$, without the mutation term.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide'}
+# Modelization ----
+mod1 <- lm(UPDRS_on_and_converted_MDS ~ Mutation * Disease_duration_1, data)
+mod2 <- lm(sqrt(UPDRS_on_and_converted_MDS) ~ Mutation * Disease_duration_1, data)
+mod3 <- lm(log(UPDRS_on_and_converted_MDS) ~ Mutation * Disease_duration_1, data)
+
+# Comparison model : the best seems to be the one with sqrt ----
+BIC(mod1, mod2, mod3)
+
+# Assumptions ----
+# https://goodekat.github.io/ggResidpanel/articles/introduction.html
+ggResidpanel::resid_panel(mod1) 
+ggResidpanel::resid_panel(mod2)
+ggResidpanel::resid_panel(mod3) 
+
+# We test the mutation effect ----
+anova(mod3)
+
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide'}
+# We test the mutation effect ----
+anova(mod3)
+```
+
+\newpage
+
+### Plot of the simple linear model with the interaction effect of the mutations
+As can be seen on the graph, there does not seem to be any real effect of the mutation on the UPDRS as a function of the disease duration except for the i/i mutation, however the effect for the i/i mutation is mainly the result of three outliers once these outliers are removed the effect seems to be much less marked.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+# Color
+# https://pmassicotte.github.io/paletteer_gallery/#Qualitative
+fig1 <- data %>% 
+  ggplot(aes(x = Disease_duration_1,
+             y = UPDRS_on_and_converted_MDS, color = Mutation)) +
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_point()+
+  geom_smooth(method = lm, formula = y ~ x, se=F)+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on") +
+  paletteer::scale_color_paletteer_d("futurevisions::mars")
+
+fig2 <- data %>% 
+  dplyr::filter(!(Mutation %in% "i/i" & UPDRS_on_and_converted_MDS >= 60)) %>% 
+  ggplot(aes(x = Disease_duration_1,
+             y = UPDRS_on_and_converted_MDS, color = Mutation)) +
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_point()+
+  geom_smooth(method = lm, formula = y ~ x, se=F)+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on") +
+  paletteer::scale_color_paletteer_d("futurevisions::mars")
+
+grid.arrange(fig1, fig2, nrow = 1)
+
+```
+
+\newpage
+
+### Plot of the best model (log) vs the linear model
+We compare the following two models: 
+
+1. $$ \text{log(UPDRS)} = \text{Disease duration} $$
+2. $$ \text{UPDRS} = \text{Disease duration} $$
+
+The best model is model 1 with the logarithmic transformation (minimization of the BIC & verified assumptions), however this model loses in simplicity and is more difficult to interpret than the simple linear model. \
+On the below plot we represent the two models in blue the one with the logarithmic transformation and in red the simple linear one. \
+We can see that these two models do not seem so different, but the blue model shows best the slow growth of the UPDRS and a faster increase when the disease duration increases.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide'}
+mod4 <- lm(log(UPDRS_on_and_converted_MDS) ~ Disease_duration_1, data)
+mod5 <- lm(UPDRS_on_and_converted_MDS ~ Disease_duration_1, data)
+
+# Testing duration effect ----
+anova(mod4)
+anova(mod5)
+confint(mod5)
+
+# Best model ----
+summary(mod4)
+summary(mod5)
+confint(mod5)
+BIC(mod4, mod5)
+
+# Assumptions ----
+ggResidpanel::resid_panel(mod4) 
+ggResidpanel::resid_panel(mod5)
+```
+
+
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+
+# Plot mod3 & mod1 ----
+eq = function(x){exp(0.018*x+2.295)}
+data %>%
+  ggplot(aes(x = Disease_duration_1,
+             y = UPDRS_on_and_converted_MDS)) +
+  geom_count()+
+  geom_function(fun=eq, color = "dodgerblue3", size = 1.5)+
+  geom_smooth(method = lm, formula = y ~ x, se = FALSE, color = "firebrick", size = 1.5)+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on")
+  
+```
+
+\newpage
+
+### Final plot
+With this model we see that with a disease duration of 0 the average UPDRS is 12.8 and that there is an increase of 4.3 UPDRS per year.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+
+# Plot mod3 & mod1 ----
+eq = function(x){exp(0.018*x+2.295)}
+data %>%
+  ggplot(aes(x = Disease_duration_1,
+             y = UPDRS_on_and_converted_MDS)) +
+  geom_count()+
+  geom_smooth(method = lm, formula = y ~ x, se = FALSE, color = "firebrick", size = 1.5)+
+  theme_bw()+
+  xlab("Disease duration, in years")+
+  ylab("UPDRS on and converted MDS") +
+  annotate("rect",xmin=-1, xmax=14, ymin=70, ymax=81, fill='white', color ="black")+
+  annotate(geom = "text", label = expression(atop("Adjusted R²:  9.8%", "p-value: 8e-08")), size = 3.5, x = 6, y = 76)
+  
+  # annotate(geom = "text", label = "p-value: 8e-08", size = 3.5, xmin = 6, xmax = 7, y = 70)
+
+  # annotation_custom(grob = textGrob("Adjusted R-squared:  9.8%"),  
+  #       xmin = 5, xmax = 12, ymin = 70, ymax = 70)
+
+  
+```
+
+\newpage
+
+## Assess if age at onset is influenced by the mutation only homozygotes
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.align='center'}
+# Filter ----
+data1 <- data %>% 
+  filter(Mutation %in% c("i/i", "s/s", "t/t")) %>% 
+  mutate(Mutation = as.character(Mutation))
+# Summary statistics ----
+data1 %>%
+  group_by(Mutation) %>%
+  get_summary_stats(Age_at_onset, type = "mean_sd")
+# ANOVA ----
+aov <- data1 %>% anova_test(Age_at_onset ~ Mutation)
+aov
+# Tests post-hoc ----
+pwc <- data1 %>% tukey_hsd(Age_at_onset ~ Mutation)
+pwc
+# Plot of the results ----
+pwc <- pwc %>% add_xy_position(x = "Mutation")
+ggboxplot(data1, x = "Mutation", y = "Age_at_onset", fill = "Mutation") +
+  stat_pvalue_manual(pwc, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(aov, detailed = TRUE),
+    caption = get_pwc_label(pwc)
+    )+ylab("Age at onset")
+```
+
+\newpage
+
+## Assess if UPDRS is influenced by the mutation only homozygotes
+The problem seems to be the same as in the previous section, there is a slight effect but mainly due to outliers.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide'}
+# Modelization ----
+mod1 <- lm(UPDRS_on_and_converted_MDS ~ Mutation * Disease_duration_1, data1)
+mod2 <- lm(sqrt(UPDRS_on_and_converted_MDS) ~ Mutation * Disease_duration_1, data1)
+mod3 <- lm(log(UPDRS_on_and_converted_MDS) ~ Mutation * Disease_duration_1, data1)
+
+# Comparison model : the best seems to be the one with sqrt ----
+BIC(mod1, mod2, mod3)
+
+# Assumptions ----
+# https://goodekat.github.io/ggResidpanel/articles/introduction.html
+ggResidpanel::resid_panel(mod1) 
+ggResidpanel::resid_panel(mod2)
+ggResidpanel::resid_panel(mod3) 
+
+# We test the mutation effect ----
+anova(mod3)
+anova(mod1)
+```
+
+
+
+### Plot
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+# Color
+# https://pmassicotte.github.io/paletteer_gallery/#Qualitative
+fig1 <- data1 %>% 
+  ggplot(aes(x = Disease_duration_1,
+             y = UPDRS_on_and_converted_MDS, color = Mutation)) +
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_point()+
+  geom_smooth(method = lm, formula = y ~ x, se=F)+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on") +
+  paletteer::scale_color_paletteer_d("futurevisions::mars")
+
+fig2 <- data1 %>% 
+  dplyr::filter(!(Mutation %in% "i/i" & UPDRS_on_and_converted_MDS >= 60)) %>% 
+  ggplot(aes(x = Disease_duration_1,
+             y = UPDRS_on_and_converted_MDS, color = Mutation)) +
+  # geom_smooth(method = lm, formula = y ~ I(x) + I(x**2), se=F, color = "darkgreen")+
+  geom_point()+
+  geom_smooth(method = lm, formula = y ~ x, se=F)+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on") +
+  paletteer::scale_color_paletteer_d("futurevisions::mars")
+
+grid.arrange(fig1, fig2, nrow = 1)
+```
+
+\newpage
+
+## Assess if age of onset is influenced by CADD score
+### Modelization
+We tested if there was an effect of CADD on age at onset, it seems that there is no statistically significant effect of CADD on age at onset.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide'}
+# Modelization ----
+mod1 <- lm(Age_at_onset ~ CADD_1, data)
+mod2 <- lm(sqrt(Age_at_onset) ~ CADD_1, data)
+mod3 <- lm(log(Age_at_onset) ~ CADD_1 , data)
+
+# Comparison model : the best seems to be the one with sqrt ----
+BIC(mod1, mod2, mod3)
+
+# Assumptions ----
+# https://goodekat.github.io/ggResidpanel/articles/introduction.html
+ggResidpanel::resid_panel(mod1) 
+ggResidpanel::resid_panel(mod2)
+ggResidpanel::resid_panel(mod3) 
+
+# We test the mutation effect ----
+summary(mod3)
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide'}
+anova(mod3)
+```
+
+### Final plot
+Moreover, as can be seen in the figure, there is no linear relationship between CADD and age at onset.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+
+# Plot mod3 & mod1 ----
+eq = function(x){exp(0.018*x+2.295)}
+data %>%
+  ggplot(aes(x = CADD_1,
+             y = Age_at_onset)) +
+  geom_count()+
+  geom_smooth(method = lm, formula = y ~ x, se = FALSE, color = "firebrick", size = 1.5)+
+  theme_bw()+
+  xlab("CADD")+
+  ylab("Age of onset")
+  # annotate(geom = "text", label = "p-value: 8e-08", size = 3.5, xmin = 6, xmax = 7, y = 70)
+
+  # annotation_custom(grob = textGrob("Adjusted R-squared:  9.8%"),  
+  #       xmin = 5, xmax = 12, ymin = 70, ymax = 70)
+
+  
+```
+
+
+\newpage
+
+## Assess if UPDRS part 3 is influenced by CADD score
+We tested if there was an effect of CADD on UPDRS and we corrected by the disease duration, it seems that there is no statistically significant effect of CADD on UPDRS.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide'}
+# Modelization ----
+mod1 <- lm(UPDRS_on_and_converted_MDS ~ Disease_duration_1 * CADD_1, data)
+mod2 <- lm(sqrt(UPDRS_on_and_converted_MDS) ~ Disease_duration_1 * CADD_1, data)
+mod3 <- lm(log(UPDRS_on_and_converted_MDS) ~ Disease_duration_1 * CADD_1 , data)
+
+# Comparison model : the best seems to be the one with sqrt ----
+BIC(mod1, mod2, mod3)
+
+# Assumptions ----
+# https://goodekat.github.io/ggResidpanel/articles/introduction.html
+ggResidpanel::resid_panel(mod1) 
+ggResidpanel::resid_panel(mod2)
+ggResidpanel::resid_panel(mod3) 
+
+Anova(mod3)
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide'}
+anova(mod3)
+```
+
+### Final plot
+Moreover, as can be seen in the figure, there is no linear relationship between CADD and UPDRS.
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+
+# Plot mod3 & mod1 ----
+data %>%
+  ggplot(aes(x = CADD_1,
+             y = UPDRS_on_and_converted_MDS,
+             )) +
+  geom_count()+
+  geom_smooth(method = lm, formula = y ~ x, se = FALSE, color = "firebrick", size = 1.5)+
+  theme_bw()+
+  xlab("CADD")+
+  ylab("Age of onset")
+  # annotate(geom = "text", label = "p-value: 8e-08", size = 3.5, xmin = 6, xmax = 7, y = 70)
+
+  # annotation_custom(grob = textGrob("Adjusted R-squared:  9.8%"),  
+  #       xmin = 5, xmax = 12, ymin = 70, ymax = 70)
+```
+
+
+\newpage
+
+## Assess if age of onset is influenced by the protein domain among homozygotes parkinson
+There does not seem to be a statistical effect of protein on disease duration.
+
+<!-- # ```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.show='hide'} -->
+<!-- # # Extreme values ---- -->
+<!-- # # it seeems that there is one extreme value -->
+<!-- # data1 %>%  -->
+<!-- #   group_by(Protein) %>% -->
+<!-- #   identify_outliers(Age_at_onset) -->
+<!-- #  -->
+<!-- # # Assumption of normality ---- -->
+<!-- # # Check -->
+<!-- # mod  <- lm(Age_at_onset ~ Protein, data = data1) -->
+<!-- # ggqqplot(residuals(mod)) -->
+<!-- # shapiro_test(residuals(mod)) -->
+<!-- #  -->
+<!-- # # Assumption of normality by groups ---- -->
+<!-- # # Check -->
+<!-- # data1 %>% -->
+<!-- #   group_by(Protein) %>% -->
+<!-- #   shapiro_test(Age_at_onset) -->
+<!-- # ggqqplot(data, "Age_at_onset", facet.by = "Mutation") -->
+<!-- #  -->
+<!-- # # The assumption of homogeneity of variances ---- -->
+<!-- # # Check -->
+<!-- # plot(mod, 1) -->
+<!-- # data1 %>% levene_test(Age_at_onset ~ Mutation) -->
+<!-- # ``` -->
+
+### Statistics
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center'}
+# Summary statistics ----
+data3 %>%
+  group_by(Protein) %>%
+  get_summary_stats(Age_at_onset, type = "mean_sd")
+```
+
+### Boxplot & ANOVA
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, results='hide', fig.align='center'}
+# Summary statistics ----
+data3 %>%
+  group_by(Protein) %>%
+  get_summary_stats(Age_at_onset, type = "mean_sd")
+# ANOVA ----
+aov <- data3 %>% anova_test(Age_at_onset ~ Protein)
+aov
+# Tests post-hoc ----
+pwc <- data3 %>% tukey_hsd(Age_at_onset ~ Protein)
+pwc
+# Plot of the results ----
+pwc <- pwc %>% add_xy_position(x = "Mutation")
+ggboxplot(data3, x = "Protein", y = "Age_at_onset", fill = "Protein") +
+  stat_pvalue_manual(pwc, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(aov, detailed = TRUE),
+    caption = get_pwc_label(pwc)
+    )+ylab("Age at onset")
+```
+
+\newpage
+
+## Assess if UPDRS is influenced by the protein domain
+There was no statistically significant effect of protein on UPDRS.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide', results='hide'}
+# Modelization ----
+mod1 <- lm(UPDRS_on_and_converted_MDS ~ Protein * Disease_duration_1, data3)
+mod2 <- lm(sqrt(UPDRS_on_and_converted_MDS) ~ Protein * Disease_duration_1, data3)
+mod3 <- lm(log(UPDRS_on_and_converted_MDS) ~ Protein * Disease_duration_1, data3)
+
+# Comparison model : the best seems to be the one with sqrt ----
+BIC(mod1, mod2, mod3)
+
+# Assumptions ----
+# https://goodekat.github.io/ggResidpanel/articles/introduction.html
+ggResidpanel::resid_panel(mod1) 
+ggResidpanel::resid_panel(mod2)
+ggResidpanel::resid_panel(mod3) 
+
+# We test the mutation effect ----
+anova(mod3)
+summary(mod3)
+```
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.show='hide'}
+anova(mod3)
+```
+
+
+### Plot of the simple linear model with the interaction effect of the mutations
+On the figure we observe a decrease for the IBR homozygous group, this is due to the fact that we have only 2 points for this group.
+
+```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'}
+# Color
+# https://pmassicotte.github.io/paletteer_gallery/#Qualitative
+data3 %>% 
+  ggplot(aes(x = Disease_duration_1,
+             y = UPDRS_on_and_converted_MDS, color = Protein)) +
+  geom_point()+
+  geom_smooth(method = lm, formula = y ~ x, se=F)+
+  theme_classic()+
+  xlab("Disease duration")+
+  ylab("UPDRS on") +
+  paletteer::scale_color_paletteer_d("futurevisions::mars")
+
+
+# M <- as.table(rbind(c(57, 6), c(33,48)))
+# (test <- chisq.test(M))
+# (test <- fisher_test(M))
+```
+
+
+<!-- ## Assess LEDD for disease duration with DBS status -->
+<!-- ```{r echo = FALSE,warning=FALSE, message=FALSE, fig.align='center', results='hide'} -->
+<!-- data3 %>% filter(DD_LEDD1 > DD_LEDD2) -->
+
+
+
+<!-- data3 <- data2 %>%  -->
+<!--   dplyr::mutate(L1 = ifelse(DD_LEDD1 > DD_LEDD2 & !is.na(DD_LEDD1) & !is.na(DD_LEDD2), LEDD2, LEDD_1), -->
+<!--                 L2 = ifelse(DD_LEDD1 > DD_LEDD2 & !is.na(DD_LEDD1) & !is.na(DD_LEDD2), LEDD_1, LEDD2), -->
+<!--                 D1 = ifelse(DD_LEDD1 > DD_LEDD2 & !is.na(DD_LEDD1) & !is.na(DD_LEDD2), DD_LEDD2, DD_LEDD1), -->
+<!--                 D2 = ifelse(DD_LEDD1 > DD_LEDD2 & !is.na(DD_LEDD1) & !is.na(DD_LEDD2), DD_LEDD1, DD_LEDD2)) %>%  -->
+<!--   dplyr::select(ID, L1, L2, D1, D2, DBS, DD_DBS) %>%  -->
+<!--   dplyr::rename(LEDD1 = L1, -->
+<!--                 LEDD2 = L2, -->
+<!--                 DD_LEDD1 = D1, -->
+<!--                 DD_LEDD2 = D2) -->
+
+
+<!-- data3 %>% pivot_longer(cols = c("LEDD1", "DD_LEDD1", "LEDD2", "DD_LEDD2"), names_to = "var", values_to = "value") -->
+
+<!-- data4 <- data3 %>%  -->
+<!--   rename(LEDD_1 = LEDD1, -->
+<!--          LEDD_2 = LEDD2, -->
+<!--          DD_1 = DD_LEDD1, -->
+<!--          DD_2 = DD_LEDD2) %>%  -->
+<!--   pivot_longer(-c("ID", "DBS", "DD_DBS"), -->
+<!--                names_to = c(".value", "Category"), -->
+<!--                names_sep = "_" -->
+<!--                ) -->
+<!-- data5 <- data3 %>%  -->
+<!--   filter(DBS == "Yes" & !is.na(DD_DBS)) %>%  -->
+<!--   mutate(DBS.y = (LEDD2 - LEDD1)*(DD_DBS - DD_LEDD1)/(DD_LEDD2-DD_LEDD1) + LEDD1) -->
+
+<!-- # plot -->
+
+<!-- p <- data4 %>%  -->
+<!--   ggplot(aes(x = DD, y = LEDD, group = ID, color = as.numeric(factor(ID))))+ -->
+<!--   geom_point()+ -->
+<!--   geom_point(data = data5, -->
+<!--              aes(x = DD_DBS, y = DBS.y), color = "red", shape = 15, size = 2)+ -->
+<!--   geom_line()+ -->
+<!--   theme(legend.position = "none") -->
+<!-- p -->
+
+<!-- ``` -->
